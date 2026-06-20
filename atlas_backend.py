@@ -43,7 +43,10 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # ==================== CONFIGURATION ====================
 
 app = Flask(__name__)
-CORS(app)
+CORS(app,
+     origins="*",
+     methods=["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"],
+     allow_headers=["Content-Type", "Authorization", "X-Requested-With"])
 
 # Configuration
 app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET', 'atlas-secret-key-change-in-production')
@@ -393,36 +396,82 @@ def signup():
 
 @app.route('/api/auth/login', methods=['POST'])
 def login():
-    """User login"""
+    """User login — checks SQLite first, falls back to Supabase on Railway restarts."""
     data = request.get_json()
-    
+
     if not data or not data.get('email') or not data.get('password'):
         return jsonify({'error': 'Missing email or password'}), 400
-    
-    email = data['email']
+
+    email    = data['email']
     password = data['password']
-    
+
+    # ── 1. Try SQLite (primary store) ──────────────────────────────────────
     conn = get_db()
-    c = conn.cursor()
+    c    = conn.cursor()
     c.execute('SELECT * FROM users WHERE email = ?', (email,))
     user = c.fetchone()
     conn.close()
-    
-    if not user or not check_password_hash(user['password'], password):
-        return jsonify({'error': 'Invalid credentials'}), 401
-    
-    access_token = create_access_token(identity=user['id'])
-    
-    return jsonify({
-        'success': True,
-        'access_token': access_token,
-        'user': {
-            'id': user['id'],
-            'email': user['email'],
-            'name': user['name'],
-            'role': user['role']
-        }
-    }), 200
+
+    if user:
+        if not check_password_hash(user['password'], password):
+            return jsonify({'error': 'Invalid credentials'}), 401
+        access_token = create_access_token(identity=user['id'])
+        return jsonify({
+            'success':      True,
+            'access_token': access_token,
+            'name':         user['name'],
+            'role':         user['role'],
+            'user': {
+                'id':    user['id'],
+                'email': user['email'],
+                'name':  user['name'],
+                'role':  user['role'],
+            }
+        }), 200
+
+    # ── 2. SQLite miss — try Supabase (recovers after Railway restart wipes DB) ──
+    sb_user = get_user(email)
+    if sb_user and check_password_hash(sb_user.get('password_hash', ''), password):
+        name = sb_user.get('name', email)
+        role = sb_user.get('role', 'student')
+        # Recreate the SQLite row so future requests don't need Supabase
+        try:
+            conn = get_db()
+            c    = conn.cursor()
+            c.execute(
+                'INSERT OR IGNORE INTO users (email, password, name, role) VALUES (?, ?, ?, ?)',
+                (email, sb_user['password_hash'], name, role)
+            )
+            if c.rowcount:
+                user_id = c.lastrowid
+                c.execute(
+                    'INSERT OR IGNORE INTO subscriptions (user_id, tier, exams_limit) VALUES (?, ?, ?)',
+                    (user_id, 'free', 5)
+                )
+            else:
+                c.execute('SELECT id FROM users WHERE email = ?', (email,))
+                user_id = c.fetchone()['id']
+            conn.commit()
+            conn.close()
+        except Exception as _e:
+            print(f'[Login] SQLite recreate error: {_e}')
+            user_id = 0
+
+        access_token = create_access_token(identity=user_id)
+        return jsonify({
+            'success':      True,
+            'access_token': access_token,
+            'name':         name,
+            'role':         role,
+            'user': {
+                'id':    user_id,
+                'email': email,
+                'name':  name,
+                'role':  role,
+            }
+        }), 200
+
+    return jsonify({'error': 'Invalid credentials'}), 401
 
 @app.route('/api/auth/profile', methods=['GET'])
 @jwt_required()
