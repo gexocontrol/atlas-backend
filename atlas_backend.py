@@ -377,8 +377,8 @@ def signup():
         save_user(email, name, role, password)
 
         # Generate token
-        access_token = create_access_token(identity=user_id)
-        
+        access_token = create_access_token(identity=str(user_id))
+
         return jsonify({
             'success': True,
             'message': 'Account created successfully',
@@ -390,9 +390,12 @@ def signup():
                 'role': role
             }
         }), 201
-        
+
     except sqlite3.IntegrityError:
         return jsonify({'error': 'Email already exists'}), 400
+    except Exception as e:
+        print(f'[Signup] Error: {e}')
+        return jsonify({'error': 'Registration failed. Please try again.'}), 500
 
 @app.route('/api/auth/login', methods=['POST'])
 def login():
@@ -415,7 +418,7 @@ def login():
     if user:
         if not check_password_hash(user['password'], password):
             return jsonify({'error': 'Invalid credentials'}), 401
-        access_token = create_access_token(identity=user['id'])
+        access_token = create_access_token(identity=str(user['id']))
         return jsonify({
             'success':      True,
             'access_token': access_token,
@@ -457,7 +460,7 @@ def login():
             print(f'[Login] SQLite recreate error: {_e}')
             user_id = 0
 
-        access_token = create_access_token(identity=user_id)
+        access_token = create_access_token(identity=str(user_id))
         return jsonify({
             'success':      True,
             'access_token': access_token,
