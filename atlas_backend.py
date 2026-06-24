@@ -13,6 +13,8 @@ from functools import wraps
 from datetime import datetime, timedelta
 import os
 import re
+import random
+import time as _time
 import json
 import base64
 import requests
@@ -100,6 +102,9 @@ if _SUPABASE_PKG and SUPABASE_URL and SUPABASE_SERVICE_KEY:
         print('[Atlas] Supabase connected OK')
     except Exception as _e:
         print(f'[Atlas] Supabase init failed: {_e}')
+
+# In-memory pending email verifications: { email: { name, password_hash, code, expires_at } }
+_pending_verifications = {}
 
 # Database setup
 DB_PATH = 'atlas.db'
@@ -386,64 +391,195 @@ def get_user_exams(user_email):
         print(f'[Supabase] get_user_exams error: {e}')
         return []
 
+# ==================== EMAIL HELPERS ====================
+
+def send_verification_email(to_email, name, code):
+    """Send a 6-digit verification code via Resend HTTP API."""
+    resend_key = os.environ.get('RESEND_API_KEY', '')
+    if not resend_key:
+        print(f'[Resend] No API key — code for {to_email}: {code}')
+        return
+    first_name = name.split()[0] if name else 'there'
+    html_body = f"""<!DOCTYPE html>
+<html>
+<body style="margin:0;padding:0;background:#F4F1EA;font-family:Inter,Arial,sans-serif;">
+<div style="max-width:480px;margin:40px auto;background:#fff;border-radius:16px;border:1px solid #E0DDD5;overflow:hidden;">
+  <div style="background:#1A1814;padding:28px 32px;">
+    <p style="color:#F4F1EA;font-size:1.1rem;font-weight:800;letter-spacing:-0.3px;margin:0;">ATLAS</p>
+  </div>
+  <div style="padding:32px;">
+    <h2 style="color:#1A1814;font-size:1.2rem;font-weight:700;margin:0 0 8px;">Hi {first_name},</h2>
+    <p style="color:#6B6560;font-size:0.9rem;line-height:1.6;margin:0 0 28px;">
+      Here is your Atlas verification code. It expires in <strong>10 minutes</strong>.
+    </p>
+    <div style="background:#F4F1EA;border-radius:12px;padding:24px;text-align:center;margin-bottom:28px;">
+      <p style="color:#1A1814;font-size:2.4rem;font-weight:800;letter-spacing:14px;margin:0;font-variant-numeric:tabular-nums;">{code}</p>
+    </div>
+    <p style="color:#9E9A94;font-size:0.78rem;line-height:1.5;margin:0;">
+      If you did not request this, you can safely ignore this email.
+    </p>
+  </div>
+</div>
+</body>
+</html>"""
+    try:
+        resp = requests.post(
+            'https://api.resend.com/emails',
+            headers={
+                'Authorization': f'Bearer {resend_key}',
+                'Content-Type':  'application/json',
+            },
+            json={
+                'from':    'Atlas <onboarding@resend.dev>',
+                'to':      [to_email],
+                'subject': 'Your Atlas verification code',
+                'html':    html_body,
+            },
+            verify=False,
+            timeout=10,
+        )
+        if resp.status_code not in (200, 201):
+            print(f'[Resend] Failed ({resp.status_code}): {resp.text}')
+        else:
+            print(f'[Resend] Code sent to {to_email}')
+    except Exception as e:
+        print(f'[Resend] Error sending to {to_email}: {e}')
+
+
 # ==================== AUTHENTICATION ROUTES ====================
 
 @app.route('/api/auth/signup', methods=['POST'])
 def signup():
-    """User registration"""
+    """
+    Step 1 of registration: validate inputs, send verification code, store pending record.
+    Does NOT create the account yet — that happens in /api/auth/verify-email.
+    """
     data = request.get_json()
-    
+
     if not data or not data.get('email') or not data.get('password') or not data.get('name'):
         return jsonify({'error': 'Missing required fields'}), 400
-    
+
     email = data['email'].strip().lower()
     if not _EMAIL_RE.match(email):
         return jsonify({'error': 'Please enter a valid email address.'}), 400
-    password = generate_password_hash(data['password'])
-    name = data['name']
-    role = data.get('role', 'teacher')
-    
+
+    name     = data['name'].strip()
+    password = data['password']
+    if len(password) < 8:
+        return jsonify({'error': 'Password must be at least 8 characters.'}), 400
+
+    # Duplicate check: SQLite first, then Supabase (handles Railway resets)
     try:
         conn = get_db()
         c = conn.cursor()
-        
-        # Create user
-        c.execute('''INSERT INTO users (email, password, name, role) 
-                     VALUES (?, ?, ?, ?)''',
-                  (email, password, name, role))
+        c.execute('SELECT id FROM users WHERE email = ?', (email,))
+        if c.fetchone():
+            conn.close()
+            return jsonify({'error': 'An account with this email already exists. Please sign in.'}), 400
+        conn.close()
+    except Exception:
+        pass
+
+    if _sb:
+        try:
+            res = _sb.table('users').select('email').eq('email', email).maybe_single().execute()
+            if res.data:
+                return jsonify({'error': 'An account with this email already exists. Please sign in.'}), 400
+        except Exception:
+            pass
+
+    # Generate code and store pending record
+    code       = str(random.randint(100000, 999999))
+    expires_at = _time.time() + 600  # 10 minutes
+
+    _pending_verifications[email] = {
+        'name':          name,
+        'password_hash': generate_password_hash(password),
+        'code':          code,
+        'expires_at':    expires_at,
+    }
+
+    send_verification_email(email, name, code)
+
+    return jsonify({'needs_verification': True, 'email': email}), 200
+
+
+@app.route('/api/auth/verify-email', methods=['POST'])
+def verify_email_route():
+    """
+    Step 2 of registration: validate the 6-digit code and create the account.
+    """
+    data  = request.get_json()
+    email = (data.get('email') or '').strip().lower()
+    code  = str(data.get('code') or '').strip()
+
+    if not email or not code:
+        return jsonify({'error': 'Email and verification code are required.'}), 400
+
+    pending = _pending_verifications.get(email)
+    if not pending:
+        return jsonify({'error': 'No pending verification found. Please sign up again.'}), 400
+
+    if _time.time() > pending['expires_at']:
+        _pending_verifications.pop(email, None)
+        return jsonify({'error': 'Verification code expired. Please sign up again.'}), 400
+
+    if pending['code'] != code:
+        return jsonify({'error': 'Incorrect verification code. Please try again.'}), 400
+
+    # Code valid — create the account
+    name          = pending['name']
+    password_hash = pending['password_hash']
+    _pending_verifications.pop(email, None)
+
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute(
+            'INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)',
+            (email, password_hash, name, 'student')
+        )
         user_id = c.lastrowid
-        
-        # Create free subscription
-        c.execute('''INSERT INTO subscriptions (user_id, tier, exams_limit) 
-                     VALUES (?, ?, ?)''',
-                  (user_id, 'free', 5))
-        
+        c.execute(
+            'INSERT INTO subscriptions (user_id, tier, exams_limit) VALUES (?, ?, ?)',
+            (user_id, 'free', 5)
+        )
         conn.commit()
         conn.close()
-
-        # Mirror to Supabase (non-fatal — SQLite remains the auth source)
-        save_user(email, name, role, password)
-
-        # Generate token
-        access_token = create_access_token(identity=str(user_id))
-
-        return jsonify({
-            'success': True,
-            'message': 'Account created successfully',
-            'access_token': access_token,
-            'user': {
-                'id': user_id,
-                'email': email,
-                'name': name,
-                'role': role
-            }
-        }), 201
-
     except sqlite3.IntegrityError:
-        return jsonify({'error': 'Email already exists'}), 400
+        return jsonify({'error': 'An account with this email already exists. Please sign in.'}), 400
     except Exception as e:
-        print(f'[Signup] Error: {e}')
-        return jsonify({'error': 'Registration failed. Please try again.'}), 500
+        print(f'[Verify] DB error: {e}')
+        return jsonify({'error': 'Account creation failed. Please try again.'}), 500
+
+    save_user(email, name, 'student', password_hash)
+    access_token = create_access_token(identity=str(user_id))
+
+    return jsonify({
+        'success':      True,
+        'message':      'Email verified — account created.',
+        'access_token': access_token,
+        'user':         {'id': user_id, 'email': email, 'name': name, 'role': 'student'},
+    }), 201
+
+
+@app.route('/api/auth/resend-code', methods=['POST'])
+def resend_code():
+    """Regenerate and resend a verification code for a pending signup."""
+    data  = request.get_json()
+    email = (data.get('email') or '').strip().lower()
+
+    pending = _pending_verifications.get(email)
+    if not pending:
+        return jsonify({'error': 'No pending signup for this email. Please sign up again.'}), 400
+
+    code               = str(random.randint(100000, 999999))
+    pending['code']       = code
+    pending['expires_at'] = _time.time() + 600
+
+    send_verification_email(email, pending['name'], code)
+
+    return jsonify({'success': True, 'message': 'Verification code resent.'}), 200
 
 @app.route('/api/auth/login', methods=['POST'])
 def login():
