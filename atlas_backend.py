@@ -722,48 +722,73 @@ def analyze_student_exam():
 @jwt_required(optional=True)
 def analyze_pdf_exam():
     """
-    Core feature: student uploads their exam PDF, Gemini analyzes mistakes and gives feedback.
-    Uses Gemini Files API so it works on both typed and handwritten/scanned PDFs.
-    No auth required — JWT is optional so the public student page can call this directly.
+    Core feature: student uploads their exam for AI analysis.
+    Accepts a single PDF ('file' key) OR one/more images ('files' key: JPG/PNG/WEBP/HEIC).
+    All files are uploaded to the Gemini Files API and passed together for multimodal analysis.
     """
-    user_id = get_jwt_identity()  # None when called without a token
+    import tempfile, time
 
-    if 'file' not in request.files:
-        return jsonify({'error': 'No file provided'}), 400
-
-    file = request.files['file']
-    if not file.filename.lower().endswith('.pdf'):
-        return jsonify({'error': 'Only PDF files are accepted'}), 400
-
-    subject = request.form.get('subject', 'General')
+    user_id      = get_jwt_identity()
+    subject      = request.form.get('subject', 'General')
     student_name = request.form.get('student_name', 'Student')
 
-    # Write upload to a temp file so Gemini Files API can read it
-    import tempfile
-    with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp:
-        file.save(tmp.name)
-        tmp_path = tmp.name
+    MIME_MAP = {
+        '.pdf':  'application/pdf',
+        '.jpg':  'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.png':  'image/png',
+        '.webp': 'image/webp',
+        '.heic': 'image/heic',
+        '.heif': 'image/heic',
+    }
 
-    gemini_file = None
+    # Prefer 'files' list (image mode); fall back to single 'file' (PDF mode)
+    raw_files = request.files.getlist('files')
+    if not raw_files or not raw_files[0].filename:
+        single = request.files.get('file')
+        if not single or not single.filename:
+            return jsonify({'error': 'No file provided'}), 400
+        raw_files = [single]
+
+    for f in raw_files:
+        ext = os.path.splitext(f.filename.lower())[1]
+        if ext not in MIME_MAP:
+            return jsonify({'error': f'Unsupported file: {f.filename}. Allowed: PDF, JPG, PNG, WEBP, HEIC'}), 400
+
+    tmp_paths    = []
+    gemini_files = []
+
     try:
-        # Upload PDF to Gemini Files API — handles text PDFs AND scanned/handwritten ones
-        gemini_file = client.files.upload(
-            file=tmp_path,
-            config={'mime_type': 'application/pdf'}
-        )
+        for f in raw_files:
+            ext  = os.path.splitext(f.filename.lower())[1]
+            mime = MIME_MAP[ext]
+            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+                f.save(tmp.name)
+                tmp_path = tmp.name
+            tmp_paths.append(tmp_path)
 
-        # Wait for the file to finish processing
-        import time
-        while gemini_file.state.name == 'PROCESSING':
-            time.sleep(1)
-            gemini_file = client.files.get(name=gemini_file.name)
+            gf = client.files.upload(file=tmp_path, config={'mime_type': mime})
+            while gf.state.name == 'PROCESSING':
+                time.sleep(1)
+                gf = client.files.get(name=gf.name)
+            if gf.state.name != 'ACTIVE':
+                return jsonify({'error': f'File processing failed for {f.filename}'}), 500
+            gemini_files.append(gf)
 
-        if gemini_file.state.name != 'ACTIVE':
-            return jsonify({'error': 'PDF processing failed on Gemini side'}), 500
+        is_pdf = len(raw_files) == 1 and raw_files[0].filename.lower().endswith('.pdf')
+        if is_pdf:
+            media_note = 'The exam is provided as a PDF document (may be typed or handwritten/scanned).'
+        elif len(raw_files) == 1:
+            media_note = 'The exam is provided as a photographed image of a single page.'
+        else:
+            media_note = (
+                f'The exam is provided as {len(raw_files)} photographed images, '
+                f'one image per exam page, in order from first to last page.'
+            )
 
         prompt = f"""You are an expert, encouraging exam marker for a student named {student_name} in the subject: {subject}.
 
-Carefully read the entire exam paper (all pages) and provide a detailed analysis.
+{media_note} Carefully read all content across every page and provide a detailed analysis.
 
 Return ONLY a valid JSON object with this exact structure (no markdown, no explanation outside the JSON):
 {{
@@ -801,7 +826,7 @@ Be rigorous but kind. Give concrete, specific feedback the student can act on im
 
         response = client.models.generate_content(
             model='gemini-2.0-flash',
-            contents=[prompt, gemini_file]
+            contents=[prompt] + gemini_files
         )
 
         try:
@@ -809,9 +834,8 @@ Be rigorous but kind. Give concrete, specific feedback the student can act on im
         except Exception:
             analysis_data = {'raw_response': response.text, 'parse_error': True}
 
-        # Persist analysis (user_id is 0 for unauthenticated requests)
         conn = get_db()
-        c = conn.cursor()
+        c    = conn.cursor()
         c.execute(
             '''INSERT INTO analysis (user_id, analysis_type, gemini_response, score, feedback)
                VALUES (?, ?, ?, ?, ?)''',
@@ -827,7 +851,6 @@ Be rigorous but kind. Give concrete, specific feedback the student can act on im
         conn.commit()
         conn.close()
 
-        # Persist to Supabase for authenticated users
         save_exam_result(
             _get_user_email(user_id),
             'pdf_exam_analysis',
@@ -837,19 +860,23 @@ Be rigorous but kind. Give concrete, specific feedback the student can act on im
         )
 
         return jsonify({
-            'success': True,
+            'success':     True,
             'analysis_id': analysis_id,
-            'analysis': analysis_data
+            'analysis':    analysis_data,
         }), 200
 
     except Exception as e:
         return jsonify({'error': f'Analysis failed: {str(e)}'}), 500
 
     finally:
-        os.unlink(tmp_path)
-        if gemini_file:
+        for tp in tmp_paths:
             try:
-                client.files.delete(name=gemini_file.name)
+                os.unlink(tp)
+            except Exception:
+                pass
+        for gf in gemini_files:
+            try:
+                client.files.delete(name=gf.name)
             except Exception:
                 pass
 
