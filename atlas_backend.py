@@ -12,6 +12,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from functools import wraps
 from datetime import datetime, timedelta
 import os
+import re
 import json
 import base64
 import requests
@@ -306,6 +307,19 @@ def get_user(email):
         print(f'[Supabase] get_user error: {e}')
         return None
 
+_EMAIL_RE = re.compile(r'^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$')
+
+def user_is_registered(email):
+    """Return True if email is in Supabase users table. Fails open if Supabase is unavailable."""
+    if not _sb:
+        return True  # can't verify — fail open
+    try:
+        res = _sb.table('users').select('email').eq('email', email).maybe_single().execute()
+        return res.data is not None
+    except Exception as e:
+        print(f'[Atlas] user_is_registered error: {e}')
+        return True  # fail open on transient error
+
 def check_monthly_usage(user_email):
     """Count AI operations logged for user_email in the current calendar month."""
     if not _sb or not user_email:
@@ -382,7 +396,9 @@ def signup():
     if not data or not data.get('email') or not data.get('password') or not data.get('name'):
         return jsonify({'error': 'Missing required fields'}), 400
     
-    email = data['email']
+    email = data['email'].strip().lower()
+    if not _EMAIL_RE.match(email):
+        return jsonify({'error': 'Please enter a valid email address.'}), 400
     password = generate_password_hash(data['password'])
     name = data['name']
     role = data.get('role', 'teacher')
@@ -767,17 +783,20 @@ def analyze_pdf_exam():
     subject      = request.form.get('subject', 'General')
     student_name = request.form.get('student_name', 'Student')
 
-    if user_email:
-        limit = get_plan_limit(user_plan, user_role)
-        used  = check_monthly_usage(user_email)
-        if used >= limit:
-            return jsonify({
-                'error':         f'Monthly limit reached ({used}/{limit} operations). Upgrade your plan to continue.',
-                'limit_reached': True,
-                'used':          used,
-                'limit':         limit,
-                'plan':          user_plan,
-            }), 429
+    if not user_email:
+        return jsonify({'error': 'Please sign in to use this feature.'}), 401
+    if not user_is_registered(user_email):
+        return jsonify({'error': 'Account not found. Please sign in again.'}), 401
+    limit = get_plan_limit(user_plan, user_role)
+    used  = check_monthly_usage(user_email)
+    if used >= limit:
+        return jsonify({
+            'error':         f'Monthly limit reached ({used}/{limit} operations). Upgrade your plan to continue.',
+            'limit_reached': True,
+            'used':          used,
+            'limit':         limit,
+            'plan':          user_plan,
+        }), 429
 
     MIME_MAP = {
         '.pdf':  'application/pdf',
@@ -941,17 +960,20 @@ def summarize_pdf():
     user_plan  = request.form.get('plan', 'free')
     user_role  = request.form.get('role', 'student')
 
-    if user_email:
-        limit = get_plan_limit(user_plan, user_role)
-        used  = check_monthly_usage(user_email)
-        if used >= limit:
-            return jsonify({
-                'error':         f'Monthly limit reached ({used}/{limit} operations). Upgrade your plan to continue.',
-                'limit_reached': True,
-                'used':          used,
-                'limit':         limit,
-                'plan':          user_plan,
-            }), 429
+    if not user_email:
+        return jsonify({'error': 'Please sign in to use this feature.'}), 401
+    if not user_is_registered(user_email):
+        return jsonify({'error': 'Account not found. Please sign in again.'}), 401
+    limit = get_plan_limit(user_plan, user_role)
+    used  = check_monthly_usage(user_email)
+    if used >= limit:
+        return jsonify({
+            'error':         f'Monthly limit reached ({used}/{limit} operations). Upgrade your plan to continue.',
+            'limit_reached': True,
+            'used':          used,
+            'limit':         limit,
+            'plan':          user_plan,
+        }), 429
 
     if 'file' not in request.files:
         return jsonify({'error': 'No file provided'}), 400
@@ -1056,17 +1078,20 @@ def create_exam_from_pdf():
     user_plan  = request.form.get('plan', 'free')
     user_role  = request.form.get('role', 'student')
 
-    if user_email:
-        limit = get_plan_limit(user_plan, user_role)
-        used  = check_monthly_usage(user_email)
-        if used >= limit:
-            return jsonify({
-                'error':         f'Monthly limit reached ({used}/{limit} operations). Upgrade your plan to continue.',
-                'limit_reached': True,
-                'used':          used,
-                'limit':         limit,
-                'plan':          user_plan,
-            }), 429
+    if not user_email:
+        return jsonify({'error': 'Please sign in to use this feature.'}), 401
+    if not user_is_registered(user_email):
+        return jsonify({'error': 'Account not found. Please sign in again.'}), 401
+    limit = get_plan_limit(user_plan, user_role)
+    used  = check_monthly_usage(user_email)
+    if used >= limit:
+        return jsonify({
+            'error':         f'Monthly limit reached ({used}/{limit} operations). Upgrade your plan to continue.',
+            'limit_reached': True,
+            'used':          used,
+            'limit':         limit,
+            'plan':          user_plan,
+        }), 429
 
     if 'file' not in request.files:
         return jsonify({'error': 'No file provided'}), 400
@@ -1213,17 +1238,20 @@ def bulk_check():
     user_plan  = request.form.get('plan', 'free')
     user_role  = request.form.get('role', 'school')
 
-    if user_email:
-        limit = get_plan_limit(user_plan, user_role)
-        used  = check_monthly_usage(user_email)
-        if used >= limit:
-            return jsonify({
-                'error':         f'Monthly limit reached ({used}/{limit} operations). Upgrade your plan to continue.',
-                'limit_reached': True,
-                'used':          used,
-                'limit':         limit,
-                'plan':          user_plan,
-            }), 429
+    if not user_email:
+        return jsonify({'error': 'Please sign in to use this feature.'}), 401
+    if not user_is_registered(user_email):
+        return jsonify({'error': 'Account not found. Please sign in again.'}), 401
+    limit = get_plan_limit(user_plan, user_role)
+    used  = check_monthly_usage(user_email)
+    if used >= limit:
+        return jsonify({
+            'error':         f'Monthly limit reached ({used}/{limit} operations). Upgrade your plan to continue.',
+            'limit_reached': True,
+            'used':          used,
+            'limit':         limit,
+            'plan':          user_plan,
+        }), 429
 
     student_files = request.files.getlist('files')
     student_files = [f for f in student_files if f.filename]
