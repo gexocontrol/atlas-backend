@@ -397,8 +397,9 @@ def send_verification_email(to_email, name, code):
     """Send a 6-digit verification code via Resend HTTP API."""
     resend_key = os.environ.get('RESEND_API_KEY', '')
     if not resend_key:
-        print(f'[Resend] No API key — code for {to_email}: {code}')
+        print(f'[Resend] RESEND_API_KEY not set — code for {to_email}: {code}')
         return
+    print(f'[Resend] Sending to={to_email}  key_prefix={resend_key[:8]}...')
     first_name = name.split()[0] if name else 'there'
     html_body = f"""<!DOCTYPE html>
 <html>
@@ -438,12 +439,9 @@ def send_verification_email(to_email, name, code):
             verify=False,
             timeout=10,
         )
-        if resp.status_code not in (200, 201):
-            print(f'[Resend] Failed ({resp.status_code}): {resp.text}')
-        else:
-            print(f'[Resend] Code sent to {to_email}')
+        print(f'[Resend] status={resp.status_code} body={resp.text[:500]}')
     except Exception as e:
-        print(f'[Resend] Error sending to {to_email}: {e}')
+        print(f'[Resend] Exception sending to {to_email}: {type(e).__name__}: {e}')
 
 
 # ==================== AUTHENTICATION ROUTES ====================
