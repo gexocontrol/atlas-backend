@@ -306,6 +306,38 @@ def get_user(email):
         print(f'[Supabase] get_user error: {e}')
         return None
 
+def check_monthly_usage(user_email):
+    """Count AI operations logged for user_email in the current calendar month."""
+    if not _sb or not user_email:
+        return 0
+    try:
+        now = datetime.utcnow()
+        month_start = now.strftime('%Y-%m-01T00:00:00')
+        res = (
+            _sb.table('exam_results')
+               .select('id', count='exact')
+               .eq('user_email', user_email)
+               .gte('created_at', month_start)
+               .execute()
+        )
+        return res.count or 0
+    except Exception as e:
+        print(f'[Atlas] check_monthly_usage error: {e}')
+        return 0
+
+def get_plan_limit(plan, role):
+    """Return monthly operation limit for a plan+role combination."""
+    plan = (plan or 'free').lower()
+    role = (role or 'student').lower()
+    if plan in ('pro', 'plus'):
+        if role == 'school':
+            return 1500
+        elif role == 'teacher':
+            return 400
+        else:
+            return 300  # student pro
+    return 10  # free tier
+
 def save_exam_result(user_email, exam_type, score=None, feedback=None, subject=None):
     """Persist an exam result to Supabase. Non-fatal — never raises."""
     if not _sb or not user_email:
@@ -729,8 +761,23 @@ def analyze_pdf_exam():
     import tempfile, time
 
     user_id      = get_jwt_identity()
+    user_email   = request.form.get('user_email', '')
+    user_plan    = request.form.get('plan', 'free')
+    user_role    = request.form.get('role', 'student')
     subject      = request.form.get('subject', 'General')
     student_name = request.form.get('student_name', 'Student')
+
+    if user_email:
+        limit = get_plan_limit(user_plan, user_role)
+        used  = check_monthly_usage(user_email)
+        if used >= limit:
+            return jsonify({
+                'error':         f'Monthly limit reached ({used}/{limit} operations). Upgrade your plan to continue.',
+                'limit_reached': True,
+                'used':          used,
+                'limit':         limit,
+                'plan':          user_plan,
+            }), 429
 
     MIME_MAP = {
         '.pdf':  'application/pdf',
@@ -889,7 +936,22 @@ def summarize_pdf():
     Student uploads any PDF document; Atlas returns a structured summary.
     No auth required — JWT is optional so the public page can call this directly.
     """
-    user_id = get_jwt_identity()
+    user_id    = get_jwt_identity()
+    user_email = request.form.get('user_email', '')
+    user_plan  = request.form.get('plan', 'free')
+    user_role  = request.form.get('role', 'student')
+
+    if user_email:
+        limit = get_plan_limit(user_plan, user_role)
+        used  = check_monthly_usage(user_email)
+        if used >= limit:
+            return jsonify({
+                'error':         f'Monthly limit reached ({used}/{limit} operations). Upgrade your plan to continue.',
+                'limit_reached': True,
+                'used':          used,
+                'limit':         limit,
+                'plan':          user_plan,
+            }), 429
 
     if 'file' not in request.files:
         return jsonify({'error': 'No file provided'}), 400
@@ -989,7 +1051,22 @@ def create_exam_from_pdf():
     Student uploads a topic/chapter PDF; Atlas generates a full practice exam with mark scheme.
     No auth required — JWT is optional so the public page can call this directly.
     """
-    user_id = get_jwt_identity()
+    user_id    = get_jwt_identity()
+    user_email = request.form.get('user_email', '')
+    user_plan  = request.form.get('plan', 'free')
+    user_role  = request.form.get('role', 'student')
+
+    if user_email:
+        limit = get_plan_limit(user_plan, user_role)
+        used  = check_monthly_usage(user_email)
+        if used >= limit:
+            return jsonify({
+                'error':         f'Monthly limit reached ({used}/{limit} operations). Upgrade your plan to continue.',
+                'limit_reached': True,
+                'used':          used,
+                'limit':         limit,
+                'plan':          user_plan,
+            }), 429
 
     if 'file' not in request.files:
         return jsonify({'error': 'No file provided'}), 400
@@ -1131,7 +1208,22 @@ def bulk_check():
     Returns per-student scores, grades, pass/fail, and a class summary.
     """
     import tempfile, time
-    user_id = get_jwt_identity()
+    user_id    = get_jwt_identity()
+    user_email = request.form.get('user_email', '')
+    user_plan  = request.form.get('plan', 'free')
+    user_role  = request.form.get('role', 'school')
+
+    if user_email:
+        limit = get_plan_limit(user_plan, user_role)
+        used  = check_monthly_usage(user_email)
+        if used >= limit:
+            return jsonify({
+                'error':         f'Monthly limit reached ({used}/{limit} operations). Upgrade your plan to continue.',
+                'limit_reached': True,
+                'used':          used,
+                'limit':         limit,
+                'plan':          user_plan,
+            }), 429
 
     student_files = request.files.getlist('files')
     student_files = [f for f in student_files if f.filename]
