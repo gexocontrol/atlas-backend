@@ -527,11 +527,14 @@ def verify_email_route():
         return jsonify({'error': 'Incorrect verification code. Please try again.'}), 400
 
     # Code valid — create the account
+    print(f'[Verify] Code matched for {email} — proceeding to account creation')
     name          = pending['name']
     password_hash = pending['password_hash']
     _pending_verifications.pop(email, None)
 
+    user_id = None
     try:
+        print(f'[Verify] Saving to SQLite: email={email} name={name}')
         conn = get_db()
         c = conn.cursor()
         c.execute(
@@ -539,20 +542,27 @@ def verify_email_route():
             (email, password_hash, name, 'student')
         )
         user_id = c.lastrowid
+        print(f'[Verify] SQLite users row inserted, user_id={user_id}')
         c.execute(
             'INSERT INTO subscriptions (user_id, tier, exams_limit) VALUES (?, ?, ?)',
             (user_id, 'free', 5)
         )
         conn.commit()
         conn.close()
-    except sqlite3.IntegrityError:
+        print(f'[Verify] SQLite commit OK — user_id={user_id}')
+    except sqlite3.IntegrityError as e:
+        print(f'[Verify] SQLite IntegrityError (duplicate?): {e}')
         return jsonify({'error': 'An account with this email already exists. Please sign in.'}), 400
     except Exception as e:
-        print(f'[Verify] DB error: {e}')
+        print(f'[Verify] SQLite unexpected error: {type(e).__name__}: {e}')
         return jsonify({'error': 'Account creation failed. Please try again.'}), 500
 
-    save_user(email, name, 'student', password_hash)
+    print(f'[Verify] Calling save_user() to upsert Supabase: email={email}')
+    sb_result = save_user(email, name, 'student', password_hash)
+    print(f'[Verify] save_user() returned: {sb_result}')
+
     access_token = create_access_token(identity=str(user_id))
+    print(f'[Verify] Account creation complete for {email} user_id={user_id}')
 
     return jsonify({
         'success':      True,
