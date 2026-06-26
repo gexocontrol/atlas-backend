@@ -46,6 +46,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # ==================== CONFIGURATION ====================
 
 app = Flask(__name__)
+print(f'[BOOT] Atlas backend vRESEND-2 starting, RESEND key present: {bool(os.environ.get("RESEND_API_KEY"))}')
 CORS(app,
      origins="*",
      methods=["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"],
