@@ -288,29 +288,62 @@ def _get_user_email(user_id):
     except Exception:
         return None
 
+def _sb_headers(prefer='return=representation'):
+    """Build Supabase REST headers. Always ASCII-safe."""
+    return {
+        'Authorization': f'Bearer {SUPABASE_SERVICE_KEY}',
+        'apikey':        SUPABASE_SERVICE_KEY,
+        'Content-Type':  'application/json',
+        'Prefer':        prefer,
+    }
+
 def save_user(email, name, role, password_hash):
-    """Upsert a user row in Supabase on signup."""
-    if not _sb:
+    """Upsert a user row in Supabase via requests (bypasses httpx to avoid ASCII codec errors with non-Latin names)."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         return None
     try:
-        res = _sb.table('users').upsert(
+        # ensure_ascii=True produces pure-ASCII JSON even for Arabic/CJK names
+        body = json.dumps(
             {'email': email, 'name': name, 'role': role, 'password_hash': password_hash},
-            on_conflict='email'
-        ).execute()
-        return res.data[0] if res.data else None
+            ensure_ascii=True,
+        ).encode('utf-8')
+        resp = requests.post(
+            f'{SUPABASE_URL}/rest/v1/users',
+            headers=_sb_headers('return=representation,resolution=merge-duplicates'),
+            params={'on_conflict': 'email'},
+            data=body,
+            verify=False,
+            timeout=10,
+        )
+        print(f'[Supabase] save_user status={resp.status_code}')
+        if resp.status_code in (200, 201):
+            data = resp.json()
+            return data[0] if data else None
+        print(f'[Supabase] save_user error body: {resp.text[:300]}')
+        return None
     except Exception as e:
-        print(f'[Supabase] save_user error: {e}')
+        print(f'[Supabase] save_user error: {type(e).__name__}: {e}')
         return None
 
 def get_user(email):
-    """Retrieve a user row from Supabase by email."""
-    if not _sb:
+    """Retrieve a user row from Supabase by email via requests."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         return None
     try:
-        res = _sb.table('users').select('*').eq('email', email).maybe_single().execute()
-        return res.data
+        resp = requests.get(
+            f'{SUPABASE_URL}/rest/v1/users',
+            headers=_sb_headers(),
+            params={'select': '*', 'email': f'eq.{email}'},
+            verify=False,
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            return data[0] if data else None
+        print(f'[Supabase] get_user HTTP {resp.status_code}: {resp.text[:300]}')
+        return None
     except Exception as e:
-        print(f'[Supabase] get_user error: {e}')
+        print(f'[Supabase] get_user error: {type(e).__name__}: {e}')
         return None
 
 _EMAIL_RE = re.compile(r'^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$')
@@ -598,7 +631,7 @@ def login():
     if not data or not data.get('email') or not data.get('password'):
         return jsonify({'error': 'Missing email or password'}), 400
 
-    email    = data['email']
+    email    = data['email'].strip().lower()
     password = data['password']
 
     # ── 1. Try SQLite (primary store) ──────────────────────────────────────
