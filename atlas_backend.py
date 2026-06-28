@@ -47,6 +47,13 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 print(f'[BOOT] Atlas backend vRESEND-2 starting, RESEND key present: {bool(os.environ.get("RESEND_API_KEY"))}')
+_dbg_url = os.environ.get('SUPABASE_URL')
+_dbg_key = os.environ.get('SUPABASE_SERVICE_KEY')
+print(f'[DEBUG-ENV] SUPABASE_URL repr      = {repr(_dbg_url)}')
+print(f'[DEBUG-ENV] SUPABASE_URL length    = {len(_dbg_url) if _dbg_url is not None else "None"}')
+print(f'[DEBUG-ENV] SUPABASE_SERVICE_KEY first12 = {repr(_dbg_key[:12]) if _dbg_key else "None"}')
+print(f'[DEBUG-ENV] SUPABASE_SERVICE_KEY last8   = {repr(_dbg_key[-8:]) if _dbg_key else "None"}')
+print(f'[DEBUG-ENV] SUPABASE_SERVICE_KEY length  = {len(_dbg_key) if _dbg_key is not None else "None"}')
 CORS(app,
      origins="*",
      methods=["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"],
