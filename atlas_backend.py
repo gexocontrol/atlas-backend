@@ -52,8 +52,10 @@ CORS(app,
      methods=["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"],
      allow_headers=["Content-Type", "Authorization", "X-Requested-With"])
 
-# Configuration
-app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET', 'atlas-secret-key-change-in-production')
+# Configuration — set JWT secret before JWTManager so HS256 never sees an empty key
+_JWT_SECRET = os.getenv('JWT_SECRET') or 'atlas-super-secret-jwt-key-2026-hardcoded-fallback'
+app.config['JWT_SECRET_KEY'] = _JWT_SECRET
+app.config['SECRET_KEY']     = _JWT_SECRET
 app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(days=30)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file size
 
@@ -289,23 +291,21 @@ def _get_user_email(user_id):
         return None
 
 def _sb_headers(prefer='return=representation'):
-    """Build Supabase REST headers. Always ASCII-safe."""
     return {
         'Authorization': f'Bearer {SUPABASE_SERVICE_KEY}',
         'apikey':        SUPABASE_SERVICE_KEY,
-        'Content-Type':  'application/json',
+        'Content-Type':  'application/json; charset=utf-8',
         'Prefer':        prefer,
     }
 
 def save_user(email, name, role, password_hash):
-    """Upsert a user row in Supabase via requests (bypasses httpx to avoid ASCII codec errors with non-Latin names)."""
+    """Upsert a user row in Supabase via requests."""
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         return None
     try:
-        # ensure_ascii=True produces pure-ASCII JSON even for Arabic/CJK names
         body = json.dumps(
             {'email': email, 'name': name, 'role': role, 'password_hash': password_hash},
-            ensure_ascii=True,
+            ensure_ascii=False,
         ).encode('utf-8')
         resp = requests.post(
             f'{SUPABASE_URL}/rest/v1/users',
