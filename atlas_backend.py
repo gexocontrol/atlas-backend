@@ -310,26 +310,27 @@ def save_user(email, name, role, password_hash):
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         return None
     try:
-        body = json.dumps(
-            {'email': email, 'name': name, 'role': role, 'password_hash': password_hash},
-            ensure_ascii=False,
-        ).encode('utf-8')
+        payload = {'email': email, 'name': name, 'role': role, 'password_hash': password_hash}
+        body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+        target_url = f'{SUPABASE_URL}/rest/v1/users'
+        print(f'[SB-DEBUG] save_user POST url     = {target_url}')
+        print(f'[SB-DEBUG] save_user payload      = {json.dumps(payload, ensure_ascii=False)}')
         resp = requests.post(
-            f'{SUPABASE_URL}/rest/v1/users',
+            target_url,
             headers=_sb_headers('return=representation,resolution=merge-duplicates'),
             params={'on_conflict': 'email'},
             data=body,
             verify=False,
             timeout=10,
         )
-        print(f'[Supabase] save_user status={resp.status_code}')
+        print(f'[SB-DEBUG] save_user status       = {resp.status_code}')
+        print(f'[SB-DEBUG] save_user response     = {resp.text}')
         if resp.status_code in (200, 201):
             data = resp.json()
             return data[0] if data else None
-        print(f'[Supabase] save_user error body: {resp.text[:300]}')
         return None
     except Exception as e:
-        print(f'[Supabase] save_user error: {type(e).__name__}: {e}')
+        print(f'[SB-DEBUG] save_user exception: {type(e).__name__}: {e}')
         return None
 
 def get_user(email):
