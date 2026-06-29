@@ -301,7 +301,7 @@ def _sb_headers(prefer='return=representation'):
     return {
         'Authorization': f'Bearer {SUPABASE_SERVICE_KEY}',
         'apikey':        SUPABASE_SERVICE_KEY,
-        'Content-Type':  'application/json; charset=utf-8',
+        'Content-Type':  'application/json',
         'Prefer':        prefer,
     }
 
