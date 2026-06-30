@@ -710,6 +710,115 @@ def login():
 
     return jsonify({'error': 'Invalid credentials'}), 401
 
+
+@app.route('/api/auth/google-login', methods=['POST'])
+def google_login():
+    """Google sign-in: check if user exists; return token+role for returning users."""
+    data  = request.get_json()
+    email = (data.get('email') or '').strip().lower()
+    name  = (data.get('name')  or '').strip()
+
+    if not email:
+        return jsonify({'error': 'Email is required'}), 400
+
+    # Check SQLite first
+    conn = get_db()
+    c    = conn.cursor()
+    c.execute('SELECT * FROM users WHERE email = ?', (email,))
+    user = c.fetchone()
+    conn.close()
+
+    if user:
+        token = create_access_token(identity=str(user['id']))
+        print(f'[Google-login] Returning user found in SQLite: email={email} role={user["role"]}')
+        return jsonify({'returning': True, 'name': user['name'], 'role': user['role'], 'token': token}), 200
+
+    # Check Supabase (handles Railway restart wipes)
+    sb_user = get_user(email)
+    if sb_user:
+        print(f'[Google-login] Returning user found in Supabase: email={email}')
+        try:
+            conn = get_db()
+            c    = conn.cursor()
+            c.execute(
+                'INSERT OR IGNORE INTO users (email, password, name, role) VALUES (?, ?, ?, ?)',
+                (email, sb_user.get('password_hash', ''), sb_user.get('name', name), sb_user.get('role', 'student'))
+            )
+            if c.rowcount:
+                user_id = c.lastrowid
+                c.execute('INSERT OR IGNORE INTO subscriptions (user_id, tier, exams_limit) VALUES (?, ?, ?)', (user_id, 'free', 5))
+            else:
+                c.execute('SELECT id FROM users WHERE email = ?', (email,))
+                row = c.fetchone()
+                user_id = row['id'] if row else 0
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f'[Google-login] SQLite recreate error: {e}')
+            user_id = 0
+
+        token = create_access_token(identity=str(user_id))
+        return jsonify({
+            'returning': True,
+            'name':  sb_user.get('name', name),
+            'role':  sb_user.get('role', 'student'),
+            'token': token,
+        }), 200
+
+    # Brand-new user
+    print(f'[Google-login] New user: email={email}')
+    return jsonify({'new_user': True}), 200
+
+
+@app.route('/api/auth/google-signup', methods=['POST'])
+def google_signup():
+    """Complete Google sign-up: save new user to SQLite + Supabase with SB-DEBUG logging."""
+    data  = request.get_json()
+    email = (data.get('email') or '').strip().lower()
+    name  = (data.get('name')  or '').strip()
+    role  = (data.get('role')  or 'student').strip()
+
+    if not email:
+        return jsonify({'error': 'Email is required'}), 400
+    if role not in ('student', 'teacher', 'school'):
+        return jsonify({'error': 'Invalid role'}), 400
+
+    user_id = None
+
+    # Save to SQLite
+    try:
+        conn = get_db()
+        c    = conn.cursor()
+        c.execute(
+            'INSERT OR IGNORE INTO users (email, password, name, role) VALUES (?, ?, ?, ?)',
+            (email, '', name, role)
+        )
+        if c.rowcount:
+            user_id = c.lastrowid
+        else:
+            c.execute('SELECT id FROM users WHERE email = ?', (email,))
+            row = c.fetchone()
+            user_id = row['id'] if row else None
+            c.execute('UPDATE users SET role = ?, name = ? WHERE email = ?', (role, name, email))
+        c.execute(
+            'INSERT OR IGNORE INTO subscriptions (user_id, tier, exams_limit) VALUES (?, ?, ?)',
+            (user_id, 'free', 5)
+        )
+        conn.commit()
+        conn.close()
+        print(f'[Google-signup] SQLite OK — email={email} role={role} user_id={user_id}')
+    except Exception as e:
+        print(f'[Google-signup] SQLite error: {type(e).__name__}: {e}')
+
+    # Save to Supabase (save_user already has [SB-DEBUG] logging)
+    print(f'[Google-signup] Calling save_user() for email={email} role={role}')
+    sb_result = save_user(email, name, role, '')
+    print(f'[Google-signup] save_user() returned: {sb_result}')
+
+    token = create_access_token(identity=str(user_id or 0))
+    return jsonify({'success': True, 'token': token, 'role': role}), 200
+
+
 @app.route('/api/auth/profile', methods=['GET'])
 @jwt_required()
 def get_profile():
