@@ -46,14 +46,6 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # ==================== CONFIGURATION ====================
 
 app = Flask(__name__)
-print(f'[BOOT] Atlas backend vRESEND-2 starting, RESEND key present: {bool(os.environ.get("RESEND_API_KEY"))}')
-_dbg_url = os.environ.get('SUPABASE_URL')
-_dbg_key = os.environ.get('SUPABASE_SERVICE_KEY')
-print(f'[DEBUG-ENV] SUPABASE_URL repr      = {repr(_dbg_url)}')
-print(f'[DEBUG-ENV] SUPABASE_URL length    = {len(_dbg_url) if _dbg_url is not None else "None"}')
-print(f'[DEBUG-ENV] SUPABASE_SERVICE_KEY first12 = {repr(_dbg_key[:12]) if _dbg_key else "None"}')
-print(f'[DEBUG-ENV] SUPABASE_SERVICE_KEY last8   = {repr(_dbg_key[-8:]) if _dbg_key else "None"}')
-print(f'[DEBUG-ENV] SUPABASE_SERVICE_KEY length  = {len(_dbg_key) if _dbg_key is not None else "None"}')
 CORS(app,
      origins="*",
      methods=["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"],
@@ -313,8 +305,6 @@ def save_user(email, name, role, password_hash):
         payload = {'email': email, 'name': name, 'role': role, 'password_hash': password_hash}
         body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
         target_url = f'{SUPABASE_URL}/rest/v1/users'
-        print(f'[SB-DEBUG] save_user POST url     = {target_url}')
-        print(f'[SB-DEBUG] save_user payload      = {json.dumps(payload, ensure_ascii=False)}')
         try:
             resp = requests.post(
                 target_url,
@@ -324,17 +314,15 @@ def save_user(email, name, role, password_hash):
                 verify=False,
                 timeout=10,
             )
-            print(f'[SB-DEBUG] save_user status       = {resp.status_code}')
-            print(f'[SB-DEBUG] save_user response     = {resp.text}')
         except Exception as e:
-            print(f'[SB-DEBUG] save_user requests.post EXCEPTION: {repr(e)}')
+            print(f'[Atlas] save_user network error: {repr(e)}')
             return None
         if resp.status_code in (200, 201):
             data = resp.json()
             return data[0] if data else None
         return None
     except Exception as e:
-        print(f'[SB-DEBUG] save_user outer exception: {repr(e)}')
+        print(f'[Atlas] save_user error: {repr(e)}')
         return None
 
 def get_user(email):
@@ -814,10 +802,7 @@ def google_signup():
     except Exception as e:
         print(f'[Google-signup] SQLite error: {type(e).__name__}: {e}')
 
-    # Save to Supabase (save_user already has [SB-DEBUG] logging)
-    print(f'[Google-signup] Calling save_user() for email={email} role={role}')
-    sb_result = save_user(email, name, role, '')
-    print(f'[Google-signup] save_user() returned: {sb_result}')
+    save_user(email, name, role, '')
 
     token = create_access_token(identity=str(user_id or 0))
     return jsonify({'success': True, 'token': token, 'role': role}), 200
